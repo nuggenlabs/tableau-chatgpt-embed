@@ -34,7 +34,7 @@ const GOOD_CONFIG = {
   username: "someone@example.com",
 };
 
-const CLOUD_VIZ = "https://10ax.online.tableau.com/t/nuggenanalytics/views/Workbook/View";
+const CLOUD_VIZ = "https://us-east-1.online.tableau.com/t/mysite/views/Workbook/View";
 
 const stubFetch = (status, body, headers = {}) => async () => ({
   ok: status >= 200 && status < 300,
@@ -49,13 +49,13 @@ check("well-formed cloud url passes", has(checkVizUrl(CLOUD_VIZ), S.PASS));
 
 check(
   "unsubstituted placeholder fails",
-  has(checkVizUrl("https://10ax.online.tableau.com/t/site/views/<workbook>/<view>"), S.FAIL),
+  has(checkVizUrl("https://us-east-1.online.tableau.com/t/site/views/<workbook>/<view>"), S.FAIL),
   "the literal template that 404'd inside the frame on 2026-08-10",
 );
 
 check(
   "address-bar form fails",
-  has(checkVizUrl("https://10ax.online.tableau.com/#/site/nuggenanalytics/views/WB/V"), S.FAIL),
+  has(checkVizUrl("https://us-east-1.online.tableau.com/#/site/mysite/views/WB/V"), S.FAIL),
   "Cloud shows /#/site/; embedding needs /t/",
 );
 
@@ -157,7 +157,7 @@ check(
 console.log("=== gating ===");
 
 const badShape = await runPreflight({
-  vizUrl: "https://10ax.online.tableau.com/t/s/views/<wb>/<v>",
+  vizUrl: "https://us-east-1.online.tableau.com/t/s/views/<wb>/<v>",
   connectedApp: GOOD_CONFIG,
   fetchImpl: async () => {
     throw new Error("live check should not have run");

@@ -62,7 +62,7 @@ console.log("=== application ===");
 const partial = writeEnv(
   "partial.env",
   [
-    "TABLEAU_VIZ_URL=https://10ax.online.tableau.com/t/site/views/WB/View",
+    "TABLEAU_VIZ_URL=https://us-east-1.online.tableau.com/t/site/views/WB/View",
     "TABLEAU_CONNECTED_APP_CLIENT_ID=",
     "TABLEAU_CONNECTED_APP_SECRET_ID=",
     "TABLEAU_CONNECTED_APP_SECRET_VALUE=",
