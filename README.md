@@ -39,13 +39,25 @@ the right one.
 
 | | |
 | --- | --- |
-| **ChatGPT** | Works. Renders, interacts, pushes state, and the model scopes answers to your selection. |
+| **ChatGPT** | Works. Renders, interacts, and pushes state; a selected mark was verified to scope the answer against a live query. You have to name the connector when asking — see [Invoking it](#invoking-it). |
 | **Claude Desktop** | Renders nothing. It approves the `frameDomains` CSP declaration and then blocks `frame-src` anyway — a host defect no server-side change can work around. [Details](docs/HOST-SUPPORT.md). |
 | **Tableau Public** | Works anonymously, no credentials needed. |
 | **Tableau Cloud** | Works, via a Direct Trust Connected App JWT signed server-side. |
 
 This is a working prototype built to answer a question — *can you have a real conversation with a
 dashboard you're looking at?* — and the answer turned out to be yes, with caveats worth reading.
+
+## Invoking it
+
+Name the connector:
+
+> *"Use the tableau-embed connector to show me the Superstore Performance dashboard"*
+
+This is the documented invocation, not a workaround for a bug. Asked without naming it,
+*"show me the dashboard"* reliably loses to ChatGPT's own chart builder, which will happily
+construct a convincing dashboard out of sample data and present it as an answer. Three rewrites of
+the tool description failed to change that. Once the dashboard is on screen, ordinary questions
+work normally — you only need to name the connector for the initial render.
 
 ## Quickstart
 
@@ -92,10 +104,13 @@ Full walkthrough, including the credential traps: **[docs/SETUP.md](docs/SETUP.m
 
 ## Two findings worth stealing
 
-**A tool description is a routing instruction.** *"Show me the Superstore dashboard"* was answered
-by ChatGPT building a plausible lookalike from a sample dataset — invented numbers, presented as an
-answer. The fix was in the description: name the capability nothing else has, and explicitly refuse
-the substitution. A tool competes with everything the host can do, not just its siblings.
+**A tool description is a routing instruction — and it can lose.** *"Show me the Superstore
+dashboard"* was answered by ChatGPT building a plausible lookalike from a sample dataset — invented
+numbers, presented as an answer. Three successive rewrites of the description failed to win the
+request back, including one that names the competing behaviour and refuses the substitution
+outright. A tool competes with everything the host can do, not just its siblings in the same
+server, and against a first-party tool a description may simply not be enough. **Unresolved** —
+name the connector, as below.
 
 **Ask the harness, not the model.** A model is not a reliable instrument for measuring its own
 context. When on-screen state stopped reaching ChatGPT, four plausible theories each blamed the
