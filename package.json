@@ -1,5 +1,5 @@
 {
-  "name": "tableau-mcp-app",
+  "name": "tableau-chatgpt-embed",
   "version": "0.1.0",
   "type": "module",
   "description": "MCP App that renders a live, interactive Tableau dashboard inside ChatGPT and pushes on-screen state to the model",
@@ -32,5 +32,13 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nuggenlabs/tableau-chatgpt-embed.git"
+  },
+  "homepage": "https://github.com/nuggenlabs/tableau-chatgpt-embed#readme",
+  "bugs": {
+    "url": "https://github.com/nuggenlabs/tableau-chatgpt-embed/issues"
   }
 }

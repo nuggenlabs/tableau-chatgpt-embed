@@ -52,8 +52,8 @@ dashboard you're looking at?* — and the answer turned out to be yes, with cave
 Requires Node 18+ and, for the Cloud path, a Tableau Connected App.
 
 ```bash
-git clone https://github.com/<you>/tableau-mcp-app.git
-cd tableau-mcp-app
+git clone https://github.com/nuggenlabs/tableau-chatgpt-embed.git
+cd tableau-chatgpt-embed
 npm install
 npm test          # proves the viz renders under the real sandbox CSP, headlessly
 ```
