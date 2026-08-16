@@ -18,7 +18,7 @@
 
 .PARAMETER TunnelName
     Use a pre-configured named tunnel instead of a quick tunnel. Requires
-    -TunnelHostname. See "Named tunnels" in docs/SETUP.md - a named tunnel only
+    -TunnelHostname. See "Named tunnels" in README.md - a named tunnel only
     yields a stable *public* hostname if you own a domain on Cloudflare.
 
 .PARAMETER TunnelHostname
@@ -108,8 +108,21 @@ function Wait-ForQuickTunnelUrl {
 try {
     if ($EmbedDebug) {
         $env:EMBED_DEBUG = '1'
-        Write-Host 'EMBED_DEBUG=1 - diagnostic panel forced on, probe JSON pushed into the chat.' -ForegroundColor Yellow
+        Write-Host 'EMBED_DEBUG=1 - on-screen diagnostic panel forced on. Not for a demo.' -ForegroundColor Yellow
+        Write-Host '  (probe JSON in the chat is a separate switch, EMBED_PROBE_MESSAGES.)' -ForegroundColor DarkGray
     }
+    else {
+        # Cleared, not merely left unset. Running `.\run.ps1 -EmbedDebug` directly
+        # in a PowerShell session sets EMBED_DEBUG on *that session*, where it
+        # outlives the run - so the next `.\run.ps1` with no switch would silently
+        # start with the panel on. That is a demo landmine: you find out on camera.
+        # Same for the probe messages, which put JSON in the transcript.
+        $env:EMBED_DEBUG = $null
+        $env:EMBED_PROBE_MESSAGES = $null
+    }
+    # Deliberately NOT cleared: state-by-message is how on-screen state reaches
+    # the model at all (see DECISIONS, 2026-08-15). Clearing it would give a
+    # clean transcript and a dashboard the model cannot see.
     $env:MCP_TRANSPORT = 'http'
     $env:PORT = "$Port"
 
@@ -193,7 +206,7 @@ try {
         Write-Host ''
         if (-not $TunnelName) {
             Write-Host '  Quick tunnel: this hostname dies with the process, so the ChatGPT' -ForegroundColor DarkYellow
-            Write-Host '  connector must be deleted and re-added. See "Named tunnels" in docs/SETUP.md.' -ForegroundColor DarkYellow
+            Write-Host '  connector must be deleted and re-added. See "Named tunnels" in README.md.' -ForegroundColor DarkYellow
             Write-Host ''
         }
         Write-Host "  Also saved to: $urlFile" -ForegroundColor DarkGray
