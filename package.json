@@ -1,0 +1,36 @@
+{
+  "name": "tableau-mcp-app",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP App that renders a live, interactive Tableau dashboard inside ChatGPT and pushes on-screen state to the model",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/env.test.js && node test/preflight.test.js && node test/server.smoke.js && node test/feasibility.test.js",
+    "test:env": "node test/env.test.js",
+    "test:preflight": "node test/preflight.test.js",
+    "test:smoke": "node test/server.smoke.js",
+    "test:feasibility": "node test/feasibility.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.2",
+    "@modelcontextprotocol/sdk": "^1.21.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.5.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "tableau",
+    "mcp",
+    "mcp-apps",
+    "model-context-protocol",
+    "chatgpt",
+    "embedding",
+    "dashboard"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+outputs/
+
+# Connected App credentials. .env.example is the committed template.
+.env
+
+# Generated test evidence (promote to a fixture deliberately if needed)
+test/probe-result.png

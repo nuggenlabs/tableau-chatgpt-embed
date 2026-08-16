@@ -1,0 +1,1042 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tableau MCP App - Feasibility Probe</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #fff;
+        color: #16181d;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { background: #16181d; color: #e8eaed; }
+      }
+      /* Diagnostics are hidden in normal use. They reveal themselves only when
+         something fails, so a broken embed still explains itself, and debug
+         mode forces them on. */
+      #diag {
+        display: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(127, 127, 127, 0.35);
+        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        font-size: 11px;
+        max-height: 260px;
+        overflow-y: auto;
+      }
+      body.debug #diag,
+      body.failed #diag { display: block; }
+
+      #loading {
+        padding: 14px 12px;
+        font-size: 12px;
+        opacity: 0.65;
+      }
+      body.ready #loading { display: none; }
+      #verdict { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+      .row { display: flex; gap: 8px; padding: 1px 0; }
+      .k { flex: 0 0 172px; opacity: 0.65; }
+      .v { flex: 1 1 auto; word-break: break-word; }
+      .ok { color: #1a7f37; }
+      .bad { color: #cf222e; }
+      .wait { color: #9a6700; }
+      @media (prefers-color-scheme: dark) {
+        .ok { color: #3fb950; } .bad { color: #f85149; } .wait { color: #d29922; }
+      }
+      #vizwrap { padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="diag">
+      <div id="verdict" class="wait">PROBE RUNNING...</div>
+      <div id="log"></div>
+    </div>
+    <div id="loading">Loading dashboard&hellip;</div>
+    <div id="vizwrap">
+      <tableau-viz
+        id="tviz"
+        src="__VIZ_URL__"
+        __VIZ_TOKEN_ATTR__
+        width="700"
+        height="850"
+        hide-tabs
+        toolbar="bottom"
+      ></tableau-viz>
+    </div>
+
+    <script>
+      // ---- Self-diagnosing probe -------------------------------------------------
+      // Goal: distinguish WHICH layer fails, so a blank box is never ambiguous.
+      //   1. Does the sandbox let us fetch the Tableau Embedding API script? (CSP script-src)
+      //   2. Does that script define the <tableau-viz> custom element?
+      //   3. Does the custom element succeed in creating its nested iframe? (CSP frame-src)
+      //   4. Does Tableau Public actually paint the viz? (X-Frame-Options / frame-ancestors)
+      const logEl = document.getElementById("log");
+      const verdictEl = document.getElementById("verdict");
+      const marks = {};
+
+      function log(key, value, cls) {
+        marks[key] = value;
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML =
+          '<div class="k">' + key + "</div><div class='v " + (cls || "") + "'>" + value + "</div>";
+        logEl.appendChild(row);
+      }
+
+      // Same panel row, rewritten in place. The heartbeat below fires forever, and
+      // appending a row every 25s would push the rows that matter off the screen.
+      const statusRows = {};
+      function logStatus(key, value, cls) {
+        marks[key] = value;
+        let row = statusRows[key];
+        if (!row) {
+          row = document.createElement("div");
+          row.className = "row";
+          logEl.appendChild(row);
+          statusRows[key] = row;
+        }
+        row.innerHTML =
+          '<div class="k">' + key + "</div><div class='v " + (cls || "") + "'>" + value + "</div>";
+      }
+
+      function verdict(text, cls) {
+        verdictEl.textContent = text;
+        verdictEl.className = cls;
+        // A failure is the one case where the user needs to see the detail.
+        if (cls === "bad") document.body.classList.add("failed");
+      }
+
+      const DEBUG = __EMBED_DEBUG__;
+      // Separate switch on purpose. The on-screen panel is a *diagnostic*; the
+      // probe messages below are *conversation content* the model reads. During
+      // a scoping test you want the first and must not have the second - probe
+      // JSON arrives as a user-role message and competes with the pushed
+      // context, which is exactly what contaminated the 2026-08-10 runs.
+      const PROBE_MESSAGES = __EMBED_PROBE_MESSAGES__;
+      // Separate from PROBE_MESSAGES, which was briefly made to carry both and
+      // put a wall of probe JSON in the transcript as the price of getting the
+      // state there. On by default: verified 2026-08-15 that updateModelContext
+      // delivers nothing in ChatGPT while sendMessage delivers reliably, proven
+      // by a nonce that matched the panel exactly.
+      const STATE_MESSAGES = __EMBED_STATE_MESSAGES__;
+      if (DEBUG) document.body.classList.add("debug");
+
+      const VIZ_URL = "__VIZ_URL__";
+      const VIZ_ORIGIN = new URL(VIZ_URL).origin;
+
+      // Handed to the handshake module once the viz is live. Module scripts are
+      // deferred and this one is not, so the viz can become interactive before
+      // the module runs, or long after it - a promise is the only ordering that
+      // is correct in both directions.
+      window.__vizReady = new Promise(function (resolve) {
+        window.__resolveVizReady = resolve;
+      });
+
+      log("origin", window.location.origin || "(opaque/null)");
+      log("is sandboxed", String(window.origin === "null" || window.origin === null));
+      log("viz origin under test", VIZ_ORIGIN);
+
+      // The host's real CSP is not visible from here and its devtools may not be
+      // reachable, so surface violations on screen. Without this, a blocked
+      // request is indistinguishable from a slow one.
+      document.addEventListener("securitypolicyviolation", function (e) {
+        log(
+          "! CSP BLOCKED",
+          e.violatedDirective + " -> " + String(e.blockedURI).slice(0, 90),
+          "bad"
+        );
+      });
+
+      window.addEventListener("error", function (e) {
+        log("! js error", String(e.message).slice(0, 120), "bad");
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        log("! promise rejected", String(e.reason).slice(0, 120), "bad");
+      });
+
+      // Direct connect-src probe. The Embedding API bootstraps the viz over XHR
+      // from THIS document, so a connect-src that omits Tableau kills the render
+      // while still allowing the script and the nested frame.
+      fetch(VIZ_ORIGIN + "/javascripts/api/tableau.embedding.3.latest.min.js", {
+        method: "GET",
+        mode: "cors",
+      })
+        .then(function (r) {
+          log("1b. connect-src (fetch)", "OK - HTTP " + r.status, "ok");
+        })
+        .catch(function (err) {
+          log("1b. connect-src (fetch)", "BLOCKED: " + String(err.message || err).slice(0, 90), "bad");
+        });
+
+      // Layer 1+2: load the Embedding API and see if the element gets defined.
+      const s = document.createElement("script");
+      s.type = "module";
+      s.src = VIZ_ORIGIN + "/javascripts/api/tableau.embedding.3.latest.min.js";
+
+      s.onerror = function () {
+        log("1. embedding api fetch", "BLOCKED (CSP or network)", "bad");
+        verdict("FAIL - sandbox blocked the Tableau Embedding API script", "bad");
+      };
+
+      s.onload = function () {
+        log("1. embedding api fetch", "OK - script loaded", "ok");
+
+        // Custom element registration is async relative to module eval.
+        customElements
+          .whenDefined("tableau-viz")
+          .then(function () {
+            log("2. <tableau-viz> defined", "OK - custom element registered", "ok");
+            watchForFrame();
+          })
+          .catch(function (e) {
+            log("2. <tableau-viz> defined", "FAILED: " + e, "bad");
+            verdict("FAIL - embedding API loaded but did not register the element", "bad");
+          });
+      };
+
+      document.head.appendChild(s);
+
+      // Layer 3+4: the Embedding API injects a nested <iframe> pointing at
+      // public.tableau.com. If frame-src blocks it, the iframe never appears.
+      function watchForFrame() {
+        const viz = document.getElementById("tviz");
+        let sawFrame = false;
+        let settled = false;
+
+        // Progress events, coarsest last. firstvizsizeknown fires well before
+        // firstinteractive, so it separates "still loading" from "stalled".
+        viz.addEventListener("firstvizsizeknown", function () {
+          log("3b. viz size known", "OK - Tableau responded with layout", "ok");
+        });
+
+        viz.addEventListener("firstinteractive", function () {
+          settled = true;
+          document.body.classList.add("ready");
+          log("4. viz rendered", "OK - firstinteractive fired", "ok");
+          verdict("PASS - viz rendered", "ok");
+          reportUp("pass");
+          window.__resolveVizReady(viz);
+        });
+
+        viz.addEventListener("vizloaderror", function (e) {
+          settled = true;
+          log("4. viz rendered", "ERROR: " + (e && e.detail ? JSON.stringify(e.detail) : e), "bad");
+          verdict("FAIL - Tableau refused to render in the sandbox", "bad");
+          reportUp("fail-vizloaderror");
+        });
+
+        // Tableau Public can be slow from a cold cache; 25s produced a false
+        // "never painted" verdict against a viz that may simply still be loading.
+        const DEADLINE_MS = 90000;
+        const started = Date.now();
+        const elapsedRow = document.createElement("div");
+        elapsedRow.className = "row";
+        logEl.appendChild(elapsedRow);
+
+        const poll = setInterval(function () {
+          const secs = Math.round((Date.now() - started) / 1000);
+          const f = viz.querySelector("iframe") || viz.shadowRoot?.querySelector("iframe");
+
+          if (f && !sawFrame) {
+            sawFrame = true;
+            // The element existing only proves the Embedding API ran. Whether the
+            // frame was allowed to NAVIGATE is reported separately by the
+            // securitypolicyviolation listener above.
+            log("3. nested iframe element", "created by the embedding api");
+            log("3a. nested iframe src", String(f.getAttribute("src") || "(empty)").slice(0, 110));
+          }
+
+          if (!settled) {
+            elapsedRow.innerHTML =
+              '<div class="k">waiting for viz</div><div class="v wait">' +
+              secs + "s / " + DEADLINE_MS / 1000 + "s" +
+              (sawFrame ? " - frame present, awaiting firstinteractive" : " - no frame yet") +
+              "</div>";
+          }
+
+          if (settled) {
+            elapsedRow.remove();
+            clearInterval(poll);
+            return;
+          }
+
+          if (Date.now() - started > DEADLINE_MS) {
+            clearInterval(poll);
+            elapsedRow.remove();
+            if (!sawFrame) {
+              log("3. nested iframe created", "NEVER APPEARED (frame-src likely blocked)", "bad");
+              verdict("FAIL - nested iframe to public.tableau.com was blocked", "bad");
+              reportUp("fail-no-iframe");
+            } else {
+              log("4. viz rendered", "iframe exists but never became interactive", "bad");
+              verdict("STALLED - frame allowed, but Tableau never finished loading", "bad");
+              reportUp("fail-frame-blank");
+            }
+          }
+        }, 500);
+      }
+
+      // Filled in by the MCP Apps handshake below, once it completes.
+      // Only failures are worth the model's attention. Announcing every success
+      // put a wall of probe JSON into the conversation.
+      //
+      // Gated on PROBE_MESSAGES, not DEBUG: turning the panel on to watch the
+      // pushes must not also start narrating into the transcript. Failures
+      // still report regardless - a broken embed the model cannot see is worse
+      // than a noisy one.
+      function reportUp(result) {
+        if (result === "pass" && !PROBE_MESSAGES) return;
+        if (window.__mcpReport) window.__mcpReport(result, marks);
+      }
+
+      // Shared with the handshake module, which runs later (module scripts are
+      // deferred) but writes into this same diagnostic panel.
+      window.__probeLog = log;
+    </script>
+
+    <!-- The MCP Apps client SDK, inlined by the server. Must run before the
+         handshake module below; module scripts execute in document order. -->
+    <script type="module">/*__MCP_APPS_SDK__*/</script>
+
+    <script type="module">
+      // ---- MCP Apps host handshake ----------------------------------------
+      // Without this the host mounts the view but never learns how tall it is,
+      // so the iframe stays at zero height: the host reports "rendered" and the
+      // user sees nothing. connect() performs ui/initialize ->
+      // ui/notifications/initialized, then autoResize (on by default) reports
+      // ui/notifications/size-changed via a ResizeObserver.
+      const log = window.__probeLog || function () {};
+      const sdk = globalThis.__MCP_APPS_SDK__;
+
+      // Declared up here, not beside the filter code below, because the
+      // handshake calls into that code before the module body reaches it -
+      // a const read from its own temporal dead zone would throw.
+      /** Long value lists are noise; the model needs the shape, not all 400. */
+      const MAX_VALUES = 12;
+      /** Coalesces the burst of events a single interaction produces. */
+      const DEBOUNCE_MS = 400;
+      /**
+       * How often unchanged state is re-sent. Pushed context is not durable in
+       * ChatGPT (see startModelContextSync), so the aim is that the user is rarely
+       * far from a fresh push. Short enough to cover clicking then typing a
+       * question; long enough to be negligible when nobody is asking anything.
+       */
+      const REFRESH_MS = 25000;
+
+      if (!sdk || !sdk.App || !sdk.PostMessageTransport) {
+        log("0. mcp apps sdk", "MISSING - inlining failed", "bad");
+      } else {
+        try {
+          const app = new sdk.App({ name: "tableau-mcp-app", version: "0.1.0" }, {});
+          await app.connect(new sdk.PostMessageTransport(window.parent, window.parent));
+
+          const host = app.getHostVersion?.();
+          log(
+            "0. mcp apps handshake",
+            "OK - connected" + (host ? " to " + host.name + " " + host.version : ""),
+            "ok"
+          );
+
+          // Dumped raw rather than read at a fixed path: the SDK's schema may
+          // drop fields, and the point is to see what the host really said about
+          // the domains it approved.
+          let caps = "(none)";
+          try {
+            caps = JSON.stringify(app.getHostCapabilities?.() ?? null);
+          } catch (e) {
+            caps = "(unserializable)";
+          }
+          log("0a. host capabilities", caps.slice(0, 400), caps.includes("tableau") ? "ok" : "");
+
+          // Now that a channel exists, probe verdicts can reach the transcript.
+          window.__mcpReport = function (result, marks) {
+            app.sendMessage?.({
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Tableau probe result: " + result + " " + JSON.stringify(marks),
+                },
+              ],
+            });
+          };
+
+          // The same channel as the probe report, exposed for the state push to
+          // use as a fallback when updateModelContext is not delivering.
+          // Always returns a promise, including on a host that does not offer
+          // sendMessage at all - the caller reports delivery from how it settles
+          // and would otherwise have nothing to report from.
+          window.__mcpSendState = function (text) {
+            if (!app.sendMessage) return Promise.reject(new Error("host has no sendMessage"));
+            return app.sendMessage({
+              role: "user",
+              content: [{ type: "text", text: text }],
+            });
+          };
+
+          // Deliberately not awaited - it runs for the life of the view. Its
+          // rejection still needs a home, or a failure here is invisible.
+          startModelContextSync(app).catch(function (e) {
+            log("5. filter state -> model", "FAILED: " + (e && e.message ? e.message : e), "bad");
+          });
+        } catch (e) {
+          log("0. mcp apps handshake", "FAILED: " + (e && e.message ? e.message : e), "bad");
+        }
+      }
+
+      // ---- Filter state -> model context -----------------------------------
+      // The model cannot see the viz. It paints client-side in this sandbox and
+      // no pixels or data cross back. So "why is this down?" is answered for ALL
+      // data unless the on-screen filter and parameter state is pushed over
+      // explicitly. That push is what makes this one app rather than a renderer
+      // and a query tool sitting next to each other.
+      //
+      // updateModelContext, not sendMessage: context updates wait for the user's
+      // next question instead of provoking a reply, and each one replaces the
+      // last. Dragging a slider therefore leaves exactly one accurate statement
+      // of on-screen state in context, not a running log of every intermediate.
+
+      async function describeFilter(f) {
+        const field = f.fieldName || f.fieldId || "(unnamed field)";
+        const type = String(f.filterType || "").toLowerCase();
+
+        if (type === "categorical") {
+          // An all-selected filter constrains nothing. Reporting it as state
+          // invites the model to "apply" a filter that is not filtering.
+          if (f.isAllSelected) return { field, type, value: "all values", constrains: false };
+
+          const values = (f.appliedValues || []).map(function (v) {
+            return v && v.formattedValue != null ? v.formattedValue : String(v && v.value);
+          });
+          if (!values.length) return null;
+
+          // isAllSelected is not trustworthy on its own: the WOW dashboard
+          // reports false for a Sub-Category filter with all 17 values selected.
+          // Taken at face value that becomes "filtered to these 17", and the
+          // model then answers a narrowed question about unnarrowed data.
+          // Comparing against the domain is what actually distinguishes them.
+          let domainSize = null;
+          try {
+            const domain = await f.getDomainAsync("relevant");
+            domainSize = domain?.values?.length ?? null;
+          } catch (e) {
+            /* older API surface or a filter type without a domain */
+          }
+          if (domainSize != null && values.length >= domainSize) {
+            return { field, type, value: "all " + domainSize + " values", constrains: false };
+          }
+
+          const rest = values.length - MAX_VALUES;
+          return {
+            field,
+            type,
+            // Truncation has to announce itself. A quietly clipped list reads as
+            // the complete selection and would be applied as one.
+            value:
+              rest > 0
+                ? values.length +
+                  " of " +
+                  (domainSize ?? "?") +
+                  " values, including: " +
+                  values.slice(0, MAX_VALUES).join(", ") +
+                  " (" + rest + " more not listed here)"
+                : values.join(", "),
+            constrains: true,
+            valueCount: values.length,
+            domainSize,
+            truncated: rest > 0,
+          };
+        }
+
+        if (type === "range" || type === "quantitative") {
+          const pick = function (b) {
+            if (b == null) return null;
+            return b.formattedValue != null ? b.formattedValue : String(b.value);
+          };
+          const lo = pick(f.minValue);
+          const hi = pick(f.maxValue);
+          if (lo == null && hi == null) return null;
+          return { field, type: "range", value: (lo ?? "?") + " to " + (hi ?? "?"), constrains: true };
+        }
+
+        // relative-date, hierarchical, and anything Tableau adds later. Naming
+        // the field is still useful even when the bounds are not readable.
+        return { field, type: type || "filter", value: "(applied)", constrains: true };
+      }
+
+      // A selection can be large - lassoing a scatter plot selects hundreds of
+      // marks. Sending them all would bury the actual question in row data, so
+      // the list is capped and the payload says how many were left out. Same
+      // lesson as the filter value lists: a silently clipped list reads as a
+      // complete one.
+      const MAX_MARKS_REPORTED = 10;
+      const MAX_FIELDS_PER_MARK = 12;
+
+      /**
+       * Reads the marks the user has clicked or lassoed.
+       *
+       * This is the most direct way a person says "this one" - they see an
+       * outlier and click it. Filters say what the whole view is narrowed to;
+       * a selection says which specific point they are asking about.
+       *
+       * Defensive throughout: the shape here (MarksCollection -> DataTable[] ->
+       * rows of DataValue) is deeper than the filter API, a click lands on one
+       * worksheet of a dashboard while the others return nothing, and none of
+       * it can be exercised headlessly by clicking.
+       */
+      async function readSelectedMarks(worksheets) {
+        const result = { marks: [], truncated: 0, sheets: [] };
+
+        for (const ws of worksheets) {
+          let collection;
+          try {
+            collection = await ws.getSelectedMarksAsync();
+          } catch (e) {
+            continue; // not every sheet type supports selection
+          }
+
+          const tables = collection && Array.isArray(collection.data) ? collection.data : [];
+          for (const table of tables) {
+            const columns = Array.isArray(table.columns) ? table.columns : [];
+            const rows = Array.isArray(table.data) ? table.data : [];
+            if (!rows.length || !columns.length) continue;
+
+            if (result.sheets.indexOf(ws.name) === -1) result.sheets.push(ws.name);
+
+            for (const row of rows) {
+              if (result.marks.length >= MAX_MARKS_REPORTED) {
+                result.truncated++;
+                continue;
+              }
+              const fields = [];
+              for (let i = 0; i < columns.length && fields.length < MAX_FIELDS_PER_MARK; i++) {
+                const col = columns[i];
+                // `index` is the column's position in the row array; it is not
+                // always the loop counter once a view has hidden fields.
+                const cell = row[col && col.index != null ? col.index : i];
+                if (!cell) continue;
+                const value = cell.formattedValue != null ? cell.formattedValue : String(cell.value);
+                fields.push({ field: (col && col.fieldName) || "(field)", value });
+              }
+              if (fields.length) result.marks.push({ sheet: ws.name, fields });
+            }
+          }
+        }
+
+        return result;
+      }
+
+      async function readVizState(viz) {
+        const workbook = viz.workbook;
+        const sheet = workbook && workbook.activeSheet;
+        const state = {
+          view: (sheet && sheet.name) || "(unknown view)",
+          filters: [],
+          parameters: [],
+          marks: [],
+          marksTruncated: 0,
+          marksSheets: [],
+        };
+
+        // A dashboard exposes its worksheets; a lone worksheet is its own source.
+        const worksheets =
+          sheet && Array.isArray(sheet.worksheets) ? sheet.worksheets : sheet ? [sheet] : [];
+
+        // One quick filter usually applies to several worksheets. To the user
+        // that is a single control, so dedupe on field + value rather than
+        // repeating "Region: Central" once per sheet.
+        const seen = new Set();
+        for (const ws of worksheets) {
+          let filters;
+          try {
+            filters = await ws.getFiltersAsync();
+          } catch (e) {
+            continue;
+          }
+          for (const f of filters || []) {
+            const d = await describeFilter(f);
+            if (!d) continue;
+            const key = d.field + " " + d.value;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            state.filters.push(d);
+          }
+        }
+
+        try {
+          const params = (await workbook.getParametersAsync()) || [];
+          for (const p of params) {
+            const cur = p.currentValue;
+            state.parameters.push({
+              name: p.name,
+              value: cur && cur.formattedValue != null ? cur.formattedValue : String(cur && cur.value),
+            });
+          }
+        } catch (e) {
+          /* parameters are optional; a workbook may expose none */
+        }
+
+        try {
+          const selected = await readSelectedMarks(worksheets);
+          state.marks = selected.marks;
+          state.marksTruncated = selected.truncated;
+          state.marksSheets = selected.sheets;
+        } catch (e) {
+          /* selection is optional; never let it break the filter push */
+        }
+
+        return state;
+      }
+
+      /**
+       * A random per-push token, so "did this push reach the model" can be asked
+       * with a question that has no other possible source.
+       *
+       * Every probe tried before this one was answerable another way. The
+       * Profit Bin Size question looked airtight until the model answered it by
+       * querying Tableau's workbook metadata - the parameter's saved value lives
+       * server-side, so with a query connector enabled the answer proves nothing.
+       * Superstore priors, workbook metadata and the live data source can all be
+       * ruled out at once by asking for something random.
+       *
+       * Numbered as well as random: the answer then names *which* push is in
+       * context, which distinguishes "nothing arrives" from "the first one
+       * arrives and updates never replace it".
+       */
+      function makeContextId(n) {
+        return "ctx-" + n + "-" + Math.random().toString(36).slice(2, 8);
+      }
+
+      /**
+       * The copy that goes out over `sendMessage`, which is NOT plumbing: it
+       * lands in the transcript as user-role text the audience reads, once per
+       * interaction, on camera. So it is written for a person first - a plain
+       * status line at the top - with the model's instructions compressed into
+       * a single closing note rather than three shouted paragraphs.
+       *
+       * This is a real divergence from `renderContext`, not a reformat. The two
+       * channels now say the same thing in different words, which reintroduces
+       * the risk that made 2026-08-15 expensive: two payloads written
+       * separately, one of them quietly licensing what the other forbids.
+       * `feasibility.test.js` runs the contradiction check over both copies for
+       * exactly that reason. Keep it that way.
+       *
+       * The closing note ends by telling the model not to reply. Every push
+       * arrives as a user turn and therefore provokes an answer, so without it
+       * a single click produces an unsolicited paragraph before the user has
+       * asked anything - half the visible clutter in a demo.
+       */
+      function renderStateMessage(state, stateId) {
+        const active = state.filters.filter(function (f) {
+          return f.constrains;
+        });
+        const params = state.parameters.map(function (p) {
+          return p.name + " = " + p.value;
+        });
+        // Rendered identically to the full payload: whatever the headline says,
+        // the model still needs the exact field/value pairs Tableau reported.
+        const markLines = state.marks.map(function (m) {
+          return m.fields
+            .map(function (f) {
+              return f.field + ": " + f.value;
+            })
+            .join(" | ");
+        });
+
+        // "no filters" vs "filtered by X" - said once, in the headline, instead
+        // of in a paragraph of its own.
+        const backdrop = active.length
+          ? "Filtered by " +
+            active
+              .map(function (f) {
+                return f.field;
+              })
+              .join(", ")
+          : "nothing else is filtered";
+
+        const lines = [];
+
+        if (state.marks.length) {
+          // The dimension values are what a person recognises - "Fasteners",
+          // not "AGG(KPI Value): 8,532". Measures come through aggregated, so
+          // anything wrapped in a function name is not the subject of the
+          // click. If that guess comes out empty the raw mark line below still
+          // carries everything, so a bad headline is cosmetic, never lossy.
+          const subjects = [];
+          for (const m of state.marks) {
+            for (const f of m.fields) {
+              if (!/^[A-Z]+\(/.test(f.field) && subjects.indexOf(f.value) === -1) {
+                subjects.push(f.value);
+              }
+            }
+          }
+          const who = subjects.length
+            ? subjects.slice(0, 3).join(", ") + (subjects.length > 3 ? ", ..." : "")
+            : state.marks.length + " mark(s)";
+          const where = state.marksSheets.length ? " on \"" + state.marksSheets.join("\", \"") + "\"" : "";
+
+          lines.push(who + " selected" + where + " - " + backdrop + ".");
+          for (const m of markLines) lines.push("Mark: " + m);
+          if (state.marksTruncated) {
+            lines.push("(" + state.marksTruncated + " more selected mark(s) not listed.)");
+          }
+        } else {
+          lines.push(
+            state.view +
+              " - " +
+              (active.length ? backdrop.charAt(0).toLowerCase() + backdrop.slice(1) : "showing all data") +
+              ".",
+          );
+          for (const f of active) lines.push("Filter: " + f.field + ": " + f.value);
+        }
+
+        if (params.length) lines.push("Parameters: " + params.join(" | "));
+
+        // No trailing instruction note, by choice, 2026-08-16. It carried the
+        // scoping rule, a "do not reply" clause and the state-id nonce, and all
+        // three read as machine exhaust in a transcript the audience is
+        // watching. The scoping rule moved to the tool's return text, which is
+        // in the conversation exactly once and is not re-read aloud on every
+        // click; see `src/server.js`.
+        //
+        // What went with it, so the loss is on the record rather than
+        // discovered later:
+        //
+        // - The **state-id nonce**. Asking the model to read it back is what
+        //   proved on 2026-08-15 that updateModelContext was delivering
+        //   nothing, after four theories had blamed the wrong layer. Delivery
+        //   is still covered headlessly by the harness and on screen by the
+        //   `5c.` panel row, but there is no longer a way to prove it from
+        //   inside a live ChatGPT conversation. Putting it back is two lines.
+        // - The **do-not-reply clause**, so a push may again provoke an
+        //   unsolicited acknowledgement. That is cosmetic and self-evident on
+        //   camera; restore it here if it returns.
+        return lines.join("\n").trim();
+      }
+
+      /**
+       * The full payload, for the invisible `updateModelContext` channel where
+       * verbosity is free. The reader-facing copy is `renderStateMessage`.
+       *
+       * `id` is labelled by channel, so each id travels on exactly one of them
+       * by construction. The first version of the message channel re-used this
+       * payload and stripped the id back out with a regex, which meant the
+       * model reporting a ctx- value proved only that the message arrived.
+       */
+      function renderContext(state, id) {
+        const active = state.filters.filter(function (f) {
+          return f.constrains;
+        });
+
+        // Frontmatter first: cheap for the model to scan, and it makes the
+        // "is anything filtered at all" question answerable without parsing prose.
+        const lines = [
+          "---",
+          "source: live Tableau dashboard embedded in this conversation",
+          "context-id: " + id,
+          "view: " + state.view,
+          "active-filters: " + active.length,
+          "parameters: " + state.parameters.length,
+          "selected-marks: " + state.marks.length,
+          "captured: " + new Date().toISOString(),
+          "---",
+          "",
+        ];
+
+        // Ahead of the filter prose on purpose. A filter says what the whole
+        // view is narrowed to; a click says which single point the user is
+        // pointing at, so when both are present the selection is the better
+        // answer to "this".
+        if (state.marks.length) {
+          const markLines = state.marks.map(function (m) {
+            return m.fields
+              .map(function (f) {
+                return f.field + ": " + f.value;
+              })
+              .join(" | ");
+          });
+
+          lines.push(
+            "THE USER HAS SELECTED " + state.marks.length + " MARK(S) ON THE DASHBOARD" +
+              (state.marksSheets.length ? " (on: " + state.marksSheets.join(", ") + ")" : "") +
+              ". They clicked these directly, so this is the most specific statement " +
+              "available of what they are asking about. If the question says \"this\", " +
+              "\"that one\", \"here\", or names an outlier without naming a value, it " +
+              "almost certainly means the selection below - scope the answer to it, and " +
+              "apply the dashboard filters underneath as well.",
+            "",
+          );
+
+          lines.push("Selected marks:");
+          for (const m of markLines) lines.push("- " + m);
+          if (state.marksTruncated) {
+            lines.push(
+              "(" + state.marksTruncated + " more selected mark(s) not listed here - the " +
+                "selection is larger than the list above.)",
+            );
+          }
+          lines.push("");
+        }
+
+        // The unfiltered wording below says questions "can be answered against the
+        // full data source". With a mark selected that is a licence to ignore the
+        // selection - and on 2026-08-15 the model took it, answering about a
+        // region it invented while Fasteners sat selected two lines above. The
+        // two sections were written separately and contradicted each other; the
+        // selection has to suppress the broad-answer sentence, not just precede it.
+        if (state.marks.length) {
+          lines.push(
+            "The dashboard as a whole is " +
+              (active.length ? "also narrowed by the filters below" : "not narrowed by any filter") +
+              ", but that describes the backdrop, NOT the question. The selection above is what " +
+              "the user is asking about. Do not widen the answer to the whole data source " +
+              "because nothing else is filtered.",
+            "",
+          );
+        } else if (active.length) {
+          lines.push(
+            "The user is looking at this dashboard right now. Its current on-screen " +
+              "state is below. When they ask about \"this\", \"the dashboard\", or the " +
+              "numbers on screen, answer for THIS state - apply these same filters when " +
+              "querying the Tableau data source, rather than answering across all data.",
+            "",
+          );
+        } else {
+          lines.push(
+            "The user is looking at this dashboard right now. No filter is narrowing " +
+              "it, so it is showing all data and questions about what is on screen can " +
+              "be answered against the full data source." +
+              (state.parameters.length
+                ? " Parameters below still affect what it displays."
+                : ""),
+            "",
+          );
+        }
+
+        if (active.length) {
+          lines.push("Filters applied:");
+          for (const f of active) lines.push("- " + f.field + ": " + f.value);
+          lines.push("");
+        }
+
+        const unfiltered = state.filters.filter(function (f) {
+          return !f.constrains;
+        });
+        if (unfiltered.length) {
+          lines.push(
+            "Present but not narrowing anything (all values selected): " +
+              unfiltered
+                .map(function (f) {
+                  return f.field;
+                })
+                .join(", "),
+            "",
+          );
+        }
+
+        if (state.parameters.length) {
+          lines.push("Parameters:");
+          for (const p of state.parameters) lines.push("- " + p.name + ": " + p.value);
+          lines.push("");
+        }
+
+        // REMOVED 2026-08-15 evening, and the removal is the experiment.
+        //
+        // A routing paragraph used to close here, telling the model to call the
+        // Tableau data query tool and ending "Do not tell the user you lack the
+        // data until you have called it." It was added at 21:09 to fix the model
+        // declining to query, and was never tested against the model.
+        //
+        // It correlates exactly with the whole context going dark. Every run
+        // before it landed could read this payload - one quoted Fasteners, $8.5K
+        // and the KPI parameter back. Every run after it could see nothing at
+        // all, including the parameter values that live in the very first push,
+        // while updateModelContext kept resolving successfully nine times over.
+        //
+        // Best explanation: a prompt-injection guard drops the block rather than
+        // editing it. That sentence is third-party content instructing the
+        // assistant to withhold something from the user and to call another
+        // connector's tool - a different class from the scoping language above,
+        // which only describes what is on screen and what it refers to.
+        //
+        // If removing it restores the context, the lesson is a constraint on this
+        // channel, not a one-off: pushed context may describe state, but must not
+        // direct the assistant's behaviour toward the user. Reintroduce the
+        // routing hint descriptively if so - "this view carries no row-level
+        // data" states a fact; "do not tell the user" issues an order.
+
+        return lines.join("\n").trim();
+      }
+
+      async function startModelContextSync(app) {
+        let caps = null;
+        try {
+          caps = app.getHostCapabilities?.();
+        } catch (e) {
+          /* fall through to the unsupported branch */
+        }
+
+        // Calling an unadvertised method throws and the rejection would surface
+        // as a scary red row on a view that is otherwise working fine.
+        if (!caps || !caps.updateModelContext) {
+          log("5. filter state -> model", "host does not accept context updates", "wait");
+          return;
+        }
+        // 2026-08-15: ChatGPT now advertises `updateModelContext: {}` with no
+        // sub-capabilities, and a nonce planted in six consecutive pushes reached
+        // the model in none of them - while every call resolved. One reading is
+        // that the accepted shape narrowed and text-only content is discarded, so
+        // send structuredContent regardless of whether it is advertised. A host
+        // that does not want it ignores an extra field; a host that now requires
+        // it starts working. Neither costs anything.
+        const sendsStructured = true;
+
+        const viz = await window.__vizReady;
+
+        let timer = null;
+        let lastSent = null;
+        let pushes = 0;
+
+        async function push(reason, opts) {
+          const force = !!(opts && opts.force);
+          const quiet = !!(opts && opts.quiet);
+          let state;
+          try {
+            state = await readVizState(viz);
+          } catch (e) {
+            log("5. filter state -> model", "could not read viz state: " + e, "bad");
+            return;
+          }
+
+          // Each update overwrites the last, so resending an unchanged state
+          // buys nothing and costs a round trip on every mouse-up during a drag.
+          // Compared on the state, not the rendered text: the text carries a
+          // `captured` timestamp, which differs every time and would defeat the
+          // check entirely.
+          const signature = JSON.stringify([
+            state.view,
+            state.filters,
+            state.parameters,
+            state.marks,
+            state.marksTruncated,
+          ]);
+          // The heartbeat re-sends deliberately unchanged state, so it has to opt
+          // out of this. Everything else still dedupes.
+          if (signature === lastSent && !force) return;
+          lastSent = signature;
+
+          const contextId = makeContextId(pushes + 1);
+          const text = renderContext(state, contextId);
+
+          try {
+            await app.updateModelContext({
+              content: [{ type: "text", text }],
+              ...(sendsStructured ? { structuredContent: state } : {}),
+            });
+            pushes++;
+            const active = state.filters.filter(function (f) {
+              return f.constrains;
+            }).length;
+            // The id is on screen because it is the ground truth for the echo
+            // test - reading it here beats re-deriving it from the harness.
+            const summary =
+              "sent #" + pushes + " on " + reason + " - " + active + " filter(s), " +
+              state.parameters.length + " parameter(s), " +
+              state.marks.length + " mark(s) - id " + contextId;
+            if (quiet) logStatus("5b. context refresh", summary, "ok");
+            else log("5. filter state -> model", summary, "ok");
+
+            // Second channel, opt-in, and carrying its OWN id so the two cannot
+            // be confused. sendMessage demonstrably reaches the model - probe
+            // JSON arriving this way is what contaminated the 2026-08-10 runs -
+            // whereas updateModelContext currently does not. If `state-id`
+            // comes back and `context-id` does not, the context channel is dead
+            // and this is the delivery path a demo has to use.
+            //
+            // Not sent on the heartbeat: one line per real interaction is
+            // tolerable in a transcript, one every 25s is not.
+            if (STATE_MESSAGES && !quiet && window.__mcpSendState) {
+              const stateId = "st-" + pushes + "-" + Math.random().toString(36).slice(2, 8);
+              // Rendered separately, not derived from `text`: this copy is the
+              // one the audience reads in the transcript, and it carries its
+              // own id so the two channels stay distinguishable.
+              const messageText = renderStateMessage(state, stateId);
+              // sendMessage is a request, not a notification - it resolves only
+              // when the host accepts it. The first version fired and forgot,
+              // so this row read "sent" whether or not anything was delivered,
+              // which is the exact trap the mark probe already taught us once.
+              window.__mcpSendState(messageText).then(
+                function () {
+                  logStatus("5c. state via message", "sent - id " + stateId, "ok");
+                },
+                function (e) {
+                  logStatus(
+                    "5c. state via message",
+                    "REJECTED: " + (e && e.message ? e.message : e),
+                    "bad",
+                  );
+                },
+              );
+            }
+          } catch (e) {
+            const err = "REJECTED: " + (e && e.message ? e.message : e);
+            if (quiet) logStatus("5b. context refresh", err, "bad");
+            else log("5. filter state -> model", err, "bad");
+          }
+        }
+
+        function schedule(reason) {
+          clearTimeout(timer);
+          timer = setTimeout(function () {
+            push(reason);
+          }, DEBOUNCE_MS);
+        }
+
+        viz.addEventListener("filterchanged", function () {
+          schedule("filterchanged");
+        });
+        viz.addEventListener("parameterchanged", function () {
+          schedule("parameterchanged");
+        });
+        // Clicking a mark is how a user says "this one" about an outlier they
+        // just spotted. Debounced with the rest: dragging a lasso fires this
+        // repeatedly, and only the final selection is worth sending.
+        viz.addEventListener("markselectionchanged", function () {
+          schedule("markselectionchanged");
+        });
+        // 2026-08-15: pushed state is NOT durable in ChatGPT. A push whose content
+        // the model quoted correctly one turn earlier was gone two turns later -
+        // it could see neither the selected mark nor a parameter value it had
+        // previously read back exactly. Every success we have recorded was a
+        // question asked immediately after a push; every failure was further from
+        // one. So the context behaves as if it accompanies a nearby turn and is
+        // then dropped, rather than persisting as state.
+        //
+        // Re-sending unchanged state on a timer keeps a recent push near whatever
+        // turn the user is about to take. This is odds-improving, not a guarantee:
+        // a question asked late in the interval still loses. The guaranteed fix is
+        // to stop depending on the model holding the state at all - see HANDOFF.
+        setInterval(function () {
+          push("refresh", { force: true, quiet: true });
+        }, REFRESH_MS);
+
+        // Recorded because the re-push on a real interaction cannot be driven
+        // headlessly - the filter controls and the marks both live inside a
+        // cross-origin frame. This row is the evidence that the wiring ran.
+        log(
+          "5a. change listeners",
+          "attached - filterchanged, parameterchanged, markselectionchanged",
+          "ok",
+        );
+
+        // The opening state matters as much as any change: the user's first
+        // question usually arrives before they touch a single filter.
+        await push("first render");
+      }
+    </script>
+  </body>
+</html>
